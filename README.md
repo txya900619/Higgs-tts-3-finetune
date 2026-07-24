@@ -24,6 +24,7 @@ Create a JSONL file where each line has the following format:
   "audio": "/path/to/target_audio.wav",       // required
   "text": "The transcript of the audio.",      // required
   "ref_audio": "/path/to/reference.wav",       // required for voice cloning
+  "ref_text": "Transcript of reference audio",       // optional for voice cloning
 }
 ```
 
