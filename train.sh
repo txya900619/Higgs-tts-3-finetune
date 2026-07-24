@@ -1,0 +1,13 @@
+accelerate launch sft.py \
+    --model-path /home/baovd5/anhnct/MOSS-TTS/DATA/pretrain/higgs-audio-v3-tts-4b-transformers \
+    --train-jsonl /home/baovd5/anhnct/MOSS-TTS/DATA/output_gemini/metadata_with_code.jsonl \
+    --output-dir output/higgs_sft_lora \
+    --use-lora \
+    --lora-rank 16 \
+    --lora-alpha 32 \
+    --per-device-batch-size 4 \
+    --gradient-accumulation-steps 8 \
+    --learning-rate 2e-5 \
+    --num-epochs 3 \
+    --mixed-precision bf16 \
+    --gradient-checkpointing
