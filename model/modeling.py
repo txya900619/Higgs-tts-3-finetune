@@ -423,6 +423,14 @@ class HiggsMultimodalQwen3ForConditionalGeneration(HiggsMultimodalQwen3PreTraine
     @torch.no_grad()
     def _encode_reference(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
         """Reference waveform -> ``[T, N]`` int64 codes (on model device)."""
+        # The only torchaudio call left in this repo. Everything that reads or
+        # writes an audio *file* moved to torchcodec, but this resamples an
+        # in-memory tensor, and torchcodec only resamples while decoding or
+        # encoding a stream -- it has no tensor->tensor equivalent. torchaudio
+        # is a required dependency regardless: transformers' own
+        # `higgs_audio_v2_tokenizer` codec is decorated
+        # @requires(backends=("torchaudio",)) and calls the same function in
+        # its _extract_semantic_features().
         import torchaudio
 
         codec = self.get_audio_codec()

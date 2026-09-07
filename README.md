@@ -5,15 +5,18 @@ Fine-tune the [Higgs Audio v3](https://huggingface.co/multimodalart/higgs-audio-
 ## Install
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-For LoRA training, also install:
+Optional extras — both are imported lazily, so you only need them if you use the feature:
 ```bash
-pip install peft
+uv sync --extra lora        # LoRA training (peft)
+uv sync --extra deepspeed   # DeepSpeed ZeRO
 ```
 
-> PyTorch with CUDA 12.8 is pinned in `requirements.txt`. Adjust `torch` / `torchaudio` versions if your CUDA version differs.
+> PyTorch with CUDA 13.0 is pinned in `pyproject.toml`. If your CUDA version differs, change the `pytorch-cu130` index URL and the `torch` / `torchaudio` / `torchcodec` pins together — the three must come from the same CUDA build.
+
+> Audio file I/O goes through **torchcodec**, not torchaudio. torchaudio remains a dependency only because transformers' `higgs_audio_v2_tokenizer` codec requires it internally.
 
 ## Prepare Data
 

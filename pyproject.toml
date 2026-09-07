@@ -1,0 +1,62 @@
+[project]
+name = "higgs-tts-3-finetune"
+version = "0.1.0"
+description = "Higgs Audio v3 TTS finetuning, with a Formosan-language data pipeline"
+requires-python = ">=3.12"
+
+dependencies = [
+    # --- model / training ---
+    "torch==2.14.0",
+    "transformers==5.16.1",   # >=5.3 required: the codec's `higgs_audio_v2_tokenizer`
+                              # model_type is native to transformers only from 5.3.0
+    "accelerate>=1.14.0",
+    "safetensors>=0.8.0",
+    "numpy>=2.1.0",
+    "tqdm>=4.70.0",
+    "wandb>=0.29.0",
+
+    # --- audio I/O ---
+    # torchcodec fully replaces torchaudio here: AudioDecoder covers load()
+    # (and resamples at decode time via sample_rate=), AudioEncoder covers
+    # save(). It is also ~21x faster than soundfile at writing many small
+    # files, which dominates the Formosan materialize stage.
+    "torchcodec==0.16.0",
+    # torchaudio is NOT used by any code in this repo any more -- torchcodec
+    # replaced every load/save/resample call site. It stays only because
+    # transformers' own `higgs_audio_v2_tokenizer` codec is decorated
+    # @requires(backends=("torchaudio",)) and calls
+    # torchaudio.functional.resample() inside _extract_semantic_features()
+    # (24kHz -> 16kHz). That is a tensor->tensor resample, the one thing
+    # torchcodec has no equivalent for (it only resamples while decoding or
+    # encoding a stream). Drop this pin the day transformers stops needing it.
+    "torchaudio==2.11.0",
+
+    # --- data pipeline ---
+    "datasets>=5.0.1",
+    "huggingface-hub>=1.30.0",
+    "hf-xet>=1.6.0",          # xet-backed transfers for the gated formospeech repos
+    "pyarrow>=25.0.0",        # scripts/formosan/materialize.py reads parquet directly
+    "scikit-learn>=1.9.0",    # scripts/formosan/pair_ref_audio.py: HDBSCAN
+]
+
+[project.optional-dependencies]
+# Both are imported lazily inside sft.py / scripts/infer.py, so they are only
+# needed if you actually train with LoRA or DeepSpeed ZeRO.
+lora = ["peft>=0.17.0"]
+deepspeed = ["deepspeed>=0.16.0"]
+
+[tool.uv]
+package = false
+
+# torch/torchcodec CUDA builds do not live on PyPI. cu130 is what carries the
+# current torch 2.14 / torchcodec 0.16 pair; the machine's driver reports CUDA
+# 13.3. Change this index (and the pins) if your CUDA differs.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
+torchcodec = { index = "pytorch-cu130" }

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
-import torchaudio
+from torchcodec.decoders import AudioDecoder
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -77,12 +77,9 @@ def encode_audio_file(
     """Encode a single audio file to ``[T, N]`` int64 codes."""
     import torch.nn.functional as F
 
-    wav, sr = torchaudio.load(wav_path)
-    wav = wav.float()
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)
-    if int(sr) != sample_rate:
-        wav = torchaudio.functional.resample(wav, int(sr), sample_rate)
+    # Decode, downmix to mono and resample to `sample_rate` in one torchcodec
+    # step (replaces torchaudio.load + mean + functional.resample).
+    wav = AudioDecoder(wav_path, sample_rate=sample_rate, num_channels=1).get_all_samples().data.float()
     # Ensure minimum length of 1 second
     if wav.shape[-1] < sample_rate:
         wav = F.pad(wav, (0, sample_rate - wav.shape[-1]))

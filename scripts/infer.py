@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 import torch
-import torchaudio
+from torchcodec.decoders import AudioDecoder
+from torchcodec.encoders import AudioEncoder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -60,7 +61,8 @@ def main() -> None:
     ref_audio = None
     ref_sr = None
     if args.ref_audio:
-        ref_audio, ref_sr = torchaudio.load(args.ref_audio)
+        _samples = AudioDecoder(args.ref_audio).get_all_samples()
+        ref_audio, ref_sr = _samples.data, _samples.sample_rate
 
     print(f"Generating speech ...")
     wav = model.generate_speech(
@@ -74,7 +76,7 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
     )
 
-    torchaudio.save(args.output, wav.unsqueeze(0), model.config.sample_rate)
+    AudioEncoder(wav.unsqueeze(0), sample_rate=model.config.sample_rate).to_file(args.output)
     print(f"Saved: {args.output}")
 
 
