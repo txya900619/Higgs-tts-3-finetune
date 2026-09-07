@@ -424,10 +424,20 @@ Hub over the network timed out after 40 minutes on one dataset).
   in eval (20 rows) and strips `ref_audio` from train rows that reference eval
   audio (21 rows). Final state: **zero audio overlap, zero cross-split refs in
   either direction.**
-- **Text overlap is NOT fixed and is a live decision.** 13-32% of each klokah
-  eval shard's sentences also occur in train (ithuan `trv-x-tgdy`: 89.5%), as
-  different recordings of the same sentence. Objective eval numbers will be
-  optimistic. Removing those rows would shrink eval by roughly a fifth.
+- **Text overlap is measured and deliberately left in place.** 13-32% of each
+  klokah eval shard's sentences also occur in train (ithuan `trv-x-tgdy`:
+  89.5%), as different recordings of the same sentence. This was raised and the
+  decision was to keep them: removing them would cost roughly a fifth of the
+  eval set, and the audio is disjoint either way (see the two fixes above), so
+  the leak is textual, not acoustic.
+
+  **Read eval numbers with that in mind.** Anything sensitive to having seen
+  the sentence before -- WER via ASR back-transcription most of all -- will
+  read optimistically, and eval loss will sit below what unseen text would
+  give. Speaker similarity and DNSMOS are largely unaffected, since neither
+  depends on the transcript. If a clean text-held-out number is ever needed,
+  filter eval rows whose `ipa` appears in any train manifest; the check that
+  produced these figures is in §8.5.
 
 ### 8.6 Rows without a reference are dropped (`--require-ref`)
 
@@ -483,8 +493,6 @@ behave exactly as before.
 
 ## 9. Still open
 
-- **Text overlap between train and eval** (see §8.5) -- unresolved by design;
-  needs a call on whether to drop the overlapping eval rows.
 - `sft.py` still has **no `--resume-from-checkpoint`**.
 - **No batch eval harness** for scoring `test.jsonl` after training (WER via
   ASR back-transcription, speaker similarity, DNSMOS on generated audio).
