@@ -86,6 +86,7 @@ mnesia/
 nosetests.xml
 .nox/
 #   option (not recommended) you can uncomment the following to ignore the entire idea folder.
+output/
 parts/
 # pdm
 .pdm-build/
