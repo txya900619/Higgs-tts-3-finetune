@@ -9,8 +9,10 @@ Per-row output schema (matches the Higgs-tts-3-finetune README's "Prepare
 Data" section):
     {"audio": <path>, "text": <ipa>, "ref_audio": <path>, "ref_text": <ipa>}
 `ref_audio`/`ref_text` are omitted entirely for rows pair_ref_audio.py
-could not find a same-speaker/same-cluster partner for (voice cloning is
-optional per-sample in this finetune code -- see src/processor.py).
+could not find a same-speaker/same-cluster partner for. Reference audio is
+optional per-sample both here and in the base model -- its card documents a
+"Zero-shot TTS" mode that takes no reference at all -- but `--require-ref`
+drops those rows anyway, and defaults to doing so. See its help text for why.
 
 No language/dialect tag is prefixed onto `text` (decided against it: the
 `ipa` text already differs enough per language/dialect, and Higgs' Qwen3
@@ -60,6 +62,30 @@ def row_to_higgs_record(row: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", default=None, help="comma-separated dataset repo ids; default = all found on disk")
+    ap.add_argument(
+        "--require-ref", choices=("all", "eval", "none"), default="all",
+        help=(
+            "Drop rows that have no ref_audio. 'all' (default) drops them from "
+            "train and eval, 'eval' only from eval, 'none' keeps everything.\n"
+            "\n"
+            "Without a reference the base model still synthesizes -- its card "
+            "calls this 'Zero-shot TTS' -- but the voice comes purely from "
+            "sampling: there is no speaker embedding or default speaker in the "
+            "prompt. Measured on six generations of one sentence differing only "
+            "by seed, pairwise speaker similarity was 0.369 (range 0.21-0.59), "
+            "squarely in this project's cross-speaker band (0.25-0.35) and "
+            "nowhere near its same-speaker band (0.72-0.88). Every generation is "
+            "a different voice; upstream issue #14 asks how to stabilize it and "
+            "is still unanswered.\n"
+            "\n"
+            "For a voice-cloning finetune those rows therefore teach the opposite "
+            "of the goal -- invent a voice when no reference is given, rather "
+            "than follow the reference -- so they are dropped by default. Keep "
+            "them (--require-ref none) only if zero-shot synthesis is also "
+            "wanted. Dropping is also what makes eval metrics well defined: "
+            "speaker similarity has nothing to compare against without a ref."
+        ),
+    )
     args = ap.parse_args()
 
     dataset_tags = None
@@ -94,6 +120,8 @@ def main() -> None:
     n_with_ref = {"train": 0, "eval": 0}
     n_dropped_dup = 0
     n_stripped_ref = 0
+    n_dropped_no_ref = {"train": 0, "eval": 0}
+    require_ref_in = {"all": {"train", "eval"}, "eval": {"eval"}, "none": set()}[args.require_ref]
     per_lang_counts: dict[str, dict[str, int]] = {}
 
     for manifest_path in iter_reffed_manifests(dataset_tags):
@@ -122,6 +150,9 @@ def main() -> None:
                     record.pop("ref_audio", None)
                     record.pop("ref_text", None)
                     n_stripped_ref += 1
+                if "ref_audio" not in record and split in require_ref_in:
+                    n_dropped_no_ref[split] += 1
+                    continue
                 out_files[split].write(json.dumps(record, ensure_ascii=False) + "\n")
                 counts[split] += 1
                 if "ref_audio" in record:
@@ -138,6 +169,10 @@ def main() -> None:
 
     print(f"dropped {n_dropped_dup} train rows whose audio also appears in eval (source-split overlap)")
     print(f"stripped ref_audio from {n_stripped_ref} train rows that referenced eval audio")
+    print(
+        f"--require-ref={args.require_ref}: dropped "
+        f"{n_dropped_no_ref['train']} train / {n_dropped_no_ref['eval']} eval rows with no ref_audio"
+    )
     print(f"train.jsonl: {counts['train']} rows ({n_with_ref['train']} with ref_audio) -> {OUT_DIR / 'train.jsonl'}")
     print(f"eval.jsonl:  {counts['eval']} rows ({n_with_ref['eval']} with ref_audio) -> {OUT_DIR / 'eval.jsonl'}")
     print(f"test.jsonl:  {counts['eval']} rows -> {test_path}  (copy of eval.jsonl, per user spec)")

@@ -196,6 +196,10 @@ files), the repo's pin was just one minor version too old. This affects
 the *entire* repo (training + inference + data prep), not just this data
 pipeline.
 
+(Note the 5.3.0 floor covers only the *codec*. The v3 TTS model card asks for
+`transformers >= 5.5` for the LM itself, so 5.5 is the real minimum; §8.1
+moved the pin to 5.16.1 anyway.)
+
 **Fixed**: bumped `requirements.txt` to `transformers==5.3.0`, verified
 the repo's own custom model classes (`model/modeling.py`,
 `model/configuration.py`) still import fine, and confirmed the codec now
@@ -279,9 +283,9 @@ Final output in `/mnt/md0/user_wayne/formosan_final/higgs_jsonl/`:
 
 | file | rows | with ref_audio |
 |---|---|---|
-| `train.jsonl` | 271,946 | 270,812 (99.6%) |
-| `eval.jsonl` | 12,689 | 12,420 (97.9%) |
-| `test.jsonl` | 12,689 | byte-identical copy of eval |
+| `train.jsonl` | 270,812 | 270,812 (100%) |
+| `eval.jsonl` | 12,420 | 12,420 (100%) |
+| `test.jsonl` | 12,420 | byte-identical copy of eval |
 
 284,655 rows survived the DNSMOS/mandarin filter out of ~530k source rows,
 covering all 42 lang_codes, 72GB of 24kHz mono wav. Verified end-to-end
@@ -425,7 +429,37 @@ Hub over the network timed out after 40 minutes on one dataset).
   different recordings of the same sentence. Objective eval numbers will be
   optimistic. Removing those rows would shrink eval by roughly a fifth.
 
-### 8.6 Validation loop (`--eval-jsonl`)
+### 8.6 Rows without a reference are dropped (`--require-ref`)
+
+Clustering leaves 1,134 train and 269 eval rows with no ref audio (0.42% /
+2.12%) -- rows that ended up alone in their cluster. `build_jsonl.py` now drops
+them from both splits by default (`--require-ref all`).
+
+Reference audio is optional per-sample, and the base model card documents a
+"Zero-shot TTS" mode that takes none, so at first glance those rows look like
+free training signal for that mode. They are not, for this project. Without a
+reference the prompt is just `<|tts|> <|text|> ... <|audio|>` -- no speaker
+embedding, no default speaker id -- and the voice comes purely from sampling.
+Measured directly: six generations of one sentence differing only by seed gave
+a mean pairwise speaker similarity of **0.369** (range 0.21-0.59), inside this
+project's cross-speaker band (0.25-0.35) and nowhere near its same-speaker band
+(0.72-0.88). Every generation is a different person. Upstream
+[issue #14](https://github.com/boson-ai/higgs-audio/issues/14) asks how to
+stabilize this and is still unanswered.
+
+So for a voice-cloning finetune those rows train the *opposite* of the goal --
+invent a voice when no reference is given, rather than follow the reference.
+They also make eval metrics ill-defined: speaker similarity has nothing to
+compare against. `--require-ref none` keeps them if zero-shot synthesis is ever
+wanted.
+
+Beware a terminology trap when reading around this: almost all Higgs
+documentation and discussion says "zero-shot voice cloning" to mean *cloning
+from a 3-5s clip without finetuning*, which still uses a reference. That is a
+different thing from the reference-free "Zero-shot TTS" in the model card's
+usage example.
+
+### 8.6.1 Validation loop (`--eval-jsonl`)
 
 `sft.py` now consumes `eval.jsonl`. It evaluates at each epoch boundary, plus
 every `--eval-steps` optimizer steps, and keeps the lowest-loss step as
