@@ -56,6 +56,7 @@ accelerate launch scripts/prepare_data.py \
 accelerate launch sft.py \
     --model-path multimodalart/higgs-audio-v3-tts-4b-transformers \
     --train-jsonl data/train_with_codes.jsonl \
+    --eval-jsonl data/eval_with_codes.jsonl \
     --output-dir output/higgs_sft_lora \
     --use-lora \
     --lora-rank 16 \
@@ -67,6 +68,25 @@ accelerate launch sft.py \
     --mixed-precision bf16 \
     --gradient-checkpointing
 ```
+
+### Validation
+
+Passing `--eval-jsonl` (same schema as `--train-jsonl`, also run through
+`prepare_data.py`) turns on validation loss and best-checkpoint selection:
+
+- evaluated at the end of every epoch, plus every `--eval-steps` optimizer
+  steps if you set it;
+- the lowest-loss step is kept as `checkpoint-best/`, and its
+  `finetune_args.json` records `best_eval_loss` / `best_eval_step` (pass
+  `--no-save-best` to skip);
+- `--per-device-eval-batch-size` defaults to the training batch size and can
+  usually be larger, since evaluation has no backward pass.
+
+The eval loss is accumulated over the whole eval set as summed per-codebook
+loss and token counts, then aggregated with the model's own formula, so it is
+directly comparable to the training loss. Averaging per-batch losses instead
+would weight short utterances too heavily, because the loss is normalised per
+token rather than per sample.
 
 ### Full fine-tuning
 

@@ -46,6 +46,27 @@ def parse_args() -> argparse.Namespace:
         "--train-jsonl", type=str, required=True,
         help="Single JSONL, directory, glob, or comma-separated list of JSONL files.",
     )
+    parser.add_argument(
+        "--eval-jsonl", type=str, default=None,
+        help="Optional eval JSONL (same schema as --train-jsonl, already prepared "
+             "with prepare_data.py). Enables validation loss and best-checkpoint "
+             "selection; without it neither is computed.",
+    )
+    parser.add_argument(
+        "--eval-steps", type=int, default=None,
+        help="Also evaluate every N optimizer steps. Default: only at the end of "
+             "each epoch.",
+    )
+    parser.add_argument(
+        "--per-device-eval-batch-size", type=int, default=None,
+        help="Defaults to --per-device-batch-size. Evaluation has no backward "
+             "pass, so this can usually be larger.",
+    )
+    parser.add_argument(
+        "--no-save-best", dest="save_best", action="store_false",
+        help="Do not keep a checkpoint-best/ copy of the lowest-eval-loss step.",
+    )
+    parser.set_defaults(save_best=True)
     parser.add_argument("--output-dir", type=str, default="output/higgs_sft")
     parser.add_argument("--per-device-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
@@ -340,6 +361,30 @@ def main() -> None:
         num_codebooks=num_codebooks,
     )
 
+    # Build eval dataset (optional). Sharding mirrors train: a pre-sharded eval
+    # set is read per-rank and left unprepared, anything else is prepared so
+    # Accelerate splits it.
+    eval_dataset = None
+    eval_pre_sharded = False
+    if args.eval_jsonl:
+        eval_paths, eval_records, eval_local_paths, eval_pre_sharded = load_jsonl_for_rank(
+            args.eval_jsonl,
+            world_size=accelerator.num_processes,
+            rank=accelerator.process_index,
+        )
+        if not eval_records:
+            raise ValueError(f"No records found in {args.eval_jsonl}.")
+        accelerator.print(
+            f"[{format_timestamp()}] [sft] eval: using_pre_sharded={eval_pre_sharded} "
+            f"total_files={len(eval_paths)} local_files={len(eval_local_paths)} "
+            f"local_records={len(eval_records)}"
+        )
+        eval_dataset = HiggsAudioSFTDataset(
+            records=eval_records,
+            processor=processor,
+            num_codebooks=num_codebooks,
+        )
+
     # Load model
     model_dtype = resolve_torch_dtype(args.mixed_precision)
     attn_impl = resolve_attn_implementation(args.attn_implementation, model_dtype)
@@ -411,6 +456,17 @@ def main() -> None:
         collate_fn=dataset.collate_fn,
     )
 
+    eval_dataloader = None
+    if eval_dataset is not None:
+        eval_dataloader = DataLoader(
+            eval_dataset,
+            batch_size=args.per_device_eval_batch_size or args.per_device_batch_size,
+            shuffle=False,
+            drop_last=False,  # every eval sample must count
+            num_workers=args.num_workers,
+            collate_fn=eval_dataset.collate_fn,
+        )
+
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     accelerator.print(
         f"[{format_timestamp()}] [sft] trainable_params={sum(p.numel() for p in trainable_params):,}"
@@ -454,6 +510,8 @@ def main() -> None:
         model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             model, optimizer, train_dataloader, lr_scheduler,
         )
+    if eval_dataloader is not None and not eval_pre_sharded:
+        eval_dataloader = accelerator.prepare(eval_dataloader)
 
     output_root = Path(args.output_dir)
     if accelerator.is_main_process:
@@ -488,10 +546,70 @@ def main() -> None:
             accelerator, args, model, train_dataloader, optimizer,
             lr_scheduler, resolved_channelwise, max_train_steps,
             global_batch_size, output_root, train_args_to_save, wandb_module,
+            eval_dataloader,
         )
     finally:
         if wandb_module is not None:
             wandb_module.finish()
+
+
+@torch.no_grad()
+def evaluate(
+    accelerator: Accelerator,
+    model,
+    eval_dataloader: DataLoader,
+    resolved_channelwise: Optional[List[float]],
+) -> tuple[Optional[float], Optional[List[float]]]:
+    """Corpus-level eval loss, aggregated exactly the way the model defines it.
+
+    The training loss is normalised by *token* count, not by sample count
+    (`all_sum_losses.sum() / total_tokens` in modeling.py), so averaging the
+    per-batch losses would silently weight short utterances more heavily. This
+    instead accumulates the per-codebook loss sums and token counts across the
+    whole eval set, then applies the model's own aggregation -- including the
+    channelwise-weighted branch -- so the number is directly comparable to the
+    training loss.
+
+    `gather_for_metrics` is used rather than a plain gather because Accelerate
+    pads the final batch of a prepared dataloader by repeating samples to keep
+    ranks in step; gathering per-sample rows lets it drop those duplicates.
+    """
+    was_training = model.training
+    model.eval()
+
+    loss_sums: Optional[torch.Tensor] = None   # [N] summed loss per codebook
+    token_nums: Optional[torch.Tensor] = None  # [N] valid tokens per codebook
+
+    for batch in eval_dataloader:
+        outputs = model(
+            input_ids=batch["input_ids"],
+            audio_codes=batch["audio_codes"],
+            audio_mask=batch["audio_mask"],
+            attention_mask=batch["attention_mask"],
+            labels_audio=batch["labels_audio"],
+            channelwise_loss_weight=resolved_channelwise,
+        )
+        sums = accelerator.gather_for_metrics(outputs.all_sum_losses.detach().float())
+        nums = accelerator.gather_for_metrics(outputs.all_token_nums.detach().float())
+        sums = sums.sum(dim=0)
+        nums = nums.sum(dim=0)
+        loss_sums = sums if loss_sums is None else loss_sums + sums
+        token_nums = nums if token_nums is None else token_nums + nums
+
+    if was_training:
+        model.train()
+    if loss_sums is None:
+        return None, None
+
+    channel_losses = loss_sums / token_nums.clamp(min=1.0)
+    if resolved_channelwise is not None:
+        weights = torch.tensor(
+            resolved_channelwise, device=channel_losses.device, dtype=channel_losses.dtype,
+        )
+        loss = (channel_losses * weights).sum() / weights.sum()
+    else:
+        loss = loss_sums.sum() / token_nums.sum().clamp(min=1.0)
+    return loss.item(), channel_losses.tolist()
 
 
 def _training_loop(
@@ -507,11 +625,58 @@ def _training_loop(
     output_root: Path,
     train_args_to_save: Dict[str, Any],
     wandb_module: Optional[Any],
+    eval_dataloader: Optional[DataLoader] = None,
 ) -> None:
     global_step = 0
     completed_epochs = 0
     last_log_time = time.perf_counter()
     last_logged_step = 0
+    best_eval_loss: Optional[float] = None
+    last_eval_step = -1
+
+    def run_eval(step: int, epoch: int) -> None:
+        """Evaluate, log, and keep the best checkpoint. No-op without --eval-jsonl.
+
+        Idempotent per step: an epoch boundary that lands exactly on an
+        --eval-steps multiple would otherwise evaluate the same weights twice.
+        """
+        nonlocal best_eval_loss, last_log_time, last_eval_step
+        if eval_dataloader is None or step == last_eval_step:
+            return
+        last_eval_step = step
+        eval_start = time.perf_counter()
+        eval_loss, channel_losses = evaluate(
+            accelerator, model, eval_dataloader, resolved_channelwise,
+        )
+        if eval_loss is None:
+            return
+        improved = best_eval_loss is None or eval_loss < best_eval_loss
+        if improved:
+            best_eval_loss = eval_loss
+        accelerator.print(
+            f"[{format_timestamp()}] [eval] epoch={epoch} step={step} "
+            f"eval_loss={eval_loss:.4f} best={best_eval_loss:.4f}"
+            f"{' *' if improved else ''} "
+            f"took={format_duration(time.perf_counter() - eval_start)}"
+        )
+        if wandb_module is not None:
+            payload = {"eval/loss": eval_loss, "eval/best_loss": best_eval_loss}
+            for i, cl in enumerate(channel_losses or []):
+                payload[f"eval/channel_{i}_loss"] = cl
+            wandb_module.log(payload, step=step)
+
+        if improved and args.save_best:
+            save_checkpoint(
+                accelerator=accelerator,
+                model=model,
+                output_dir=output_root / "checkpoint-best",
+                train_args={**train_args_to_save, "best_eval_loss": eval_loss,
+                            "best_eval_step": step, "best_eval_epoch": epoch},
+                is_lora=getattr(args, "use_lora", False),
+            )
+        # Evaluation and checkpointing are not training time; don't let them
+        # contaminate the next step-rate/ETA measurement.
+        last_log_time = time.perf_counter()
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -574,8 +739,13 @@ def _training_loop(
                             step=global_step,
                         )
 
+                if args.eval_steps and global_step % args.eval_steps == 0:
+                    run_eval(global_step, epoch)
+
                 if global_step >= max_train_steps:
                     break
+
+        run_eval(global_step, epoch)
 
         checkpoint_dir = output_root / f"checkpoint-epoch-{epoch}"
         save_checkpoint(
@@ -590,9 +760,11 @@ def _training_loop(
         if global_step >= max_train_steps:
             break
 
+    best = f", best_eval_loss={best_eval_loss:.4f}" if best_eval_loss is not None else ""
     accelerator.print(
         f"[{format_timestamp()}] Finished training: "
-        f"global_step={global_step}, saved_epochs={completed_epochs}, output_dir={output_root}"
+        f"global_step={global_step}, saved_epochs={completed_epochs}{best}, "
+        f"output_dir={output_root}"
     )
 
 

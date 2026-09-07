@@ -54,10 +54,14 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import torch
-from huggingface_hub import hf_hub_download
 from torchcodec.decoders import AudioDecoder
 from torchcodec.encoders import AudioEncoder
 
+# `common` must be imported BEFORE huggingface_hub: it sets HF_HOME via
+# os.environ.setdefault, and huggingface_hub freezes its cache paths at import
+# time. Importing hf_hub_download first silently sends every download to
+# ~/.cache/huggingface instead -- which on this machine is the small root
+# partition, and quietly put 60GB of klokah parquet there.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     DNSMOS_OVRL_MIN,
@@ -69,6 +73,8 @@ from common import (  # noqa: E402
     resolve_splits,
     strip_ipa_dashes,
 )
+
+from huggingface_hub import hf_hub_download  # noqa: E402  (must follow `common`)
 
 # Everything except `audio`; pulled separately so the (large) audio column is
 # only materialized one row group at a time.

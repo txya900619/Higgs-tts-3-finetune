@@ -225,6 +225,20 @@ this up automatically.
 
 ## 7. Running this on a different server
 
+**Import order matters in `scripts/formosan/materialize.py`.** `common.py`
+points HF_HOME at the shared cache via `os.environ.setdefault`, but
+`huggingface_hub` freezes its cache paths at *import* time. Importing anything
+from `huggingface_hub` before `common` therefore sends every download to
+`~/.cache/huggingface` instead, silently -- which on this machine is the small
+root partition, and put 60GB of klokah parquet there before it was noticed.
+`materialize.py` imports `hf_hub_download` after `common` for exactly this
+reason; keep it that way, and prefer setting `HF_HOME` in the environment too.
+
+Also note `$HF_HOME/modules/transformers_modules` on this machine is owned by
+root, so `trust_remote_code` loads fail with `PermissionError` until someone
+runs `chown`; `HF_MODULES_CACHE=<writable dir>` works around it.
+
+
 Nothing here is irreplaceably tied to this machine. What a new server
 needs:
 
@@ -411,12 +425,32 @@ Hub over the network timed out after 40 minutes on one dataset).
   different recordings of the same sentence. Objective eval numbers will be
   optimistic. Removing those rows would shrink eval by roughly a fifth.
 
+### 8.6 Validation loop (`--eval-jsonl`)
+
+`sft.py` now consumes `eval.jsonl`. It evaluates at each epoch boundary, plus
+every `--eval-steps` optimizer steps, and keeps the lowest-loss step as
+`checkpoint-best/`.
+
+The one subtlety worth preserving: the training loss is normalised **per
+token**, not per sample (`all_sum_losses.sum() / total_tokens` in
+`model/modeling.py`), so averaging per-batch eval losses would quietly
+over-weight short utterances. `evaluate()` instead accumulates the per-codebook
+loss sums and token counts across the entire eval set -- both are already
+returned as `all_sum_losses` / `all_token_nums` -- and then applies the model's
+own aggregation, including the channelwise-weighted branch. The result is
+directly comparable to the training loss. `gather_for_metrics` is used rather
+than a plain gather because Accelerate pads the last batch of a prepared
+dataloader by repeating samples; gathering per-sample rows lets it drop those.
+
+Smoke-tested on the real data (40 train / 16 eval rows through the 4B model
+with LoRA): eval loss tracked, `checkpoint-best/` written with
+`best_eval_loss` in its `finetune_args.json`, and runs without `--eval-jsonl`
+behave exactly as before.
+
 ## 9. Still open
 
 - **Text overlap between train and eval** (see §8.5) -- unresolved by design;
   needs a call on whether to drop the overlapping eval rows.
-- `sft.py` still has **no eval loop / `--eval-jsonl`**, so nothing consumes
-  `eval.jsonl` for validation loss or checkpoint selection.
 - `sft.py` still has **no `--resume-from-checkpoint`**.
 - **No batch eval harness** for scoring `test.jsonl` after training (WER via
   ASR back-transcription, speaker similarity, DNSMOS on generated audio).
