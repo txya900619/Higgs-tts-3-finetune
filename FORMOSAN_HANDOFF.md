@@ -286,15 +286,16 @@ Final output in `/mnt/md0/user_wayne/formosan_final/higgs_jsonl/`:
 
 | file | rows | with ref_audio |
 |---|---|---|
-| `train.jsonl` | 270,765 | 270,765 (100%) |
-| `eval.jsonl` | 12,420 | 12,420 (100%) |
-| `test.jsonl` | 12,420 | byte-identical copy of eval |
+| `train.jsonl` | 174,399 | 174,399 (100%) |
+| `eval.jsonl` | 7,844 | 7,844 (100%) |
+| `test.jsonl` | 7,844 | byte-identical copy of eval |
 
 Encoded through `prepare_data.py` into `train_codes.jsonl` (3.25GB) /
 `eval_codes.jsonl` / `test_codes.jsonl`, which is what `sft.py` consumes.
 
 284,655 rows survived the DNSMOS/mandarin filter out of ~530k source rows,
-covering all 42 lang_codes, 72GB of 24kHz mono wav. Verified end-to-end
+covering all 42 lang_codes, 72GB of 24kHz mono wav; the 3-second minimum
+(§8.7) then takes the trainable set to 174,399 / 7,844. Verified end-to-end
 through the unmodified `scripts/prepare_data.py` -> `[T, N=8]` codes.
 
 ### 8.1 Environment rebuilt (`pyproject.toml`, cu130)
@@ -539,6 +540,28 @@ Smoke-tested on the real data (40 train / 16 eval rows through the 4B model
 with LoRA): eval loss tracked, `checkpoint-best/` written with
 `best_eval_loss` in its `finetune_args.json`, and runs without `--eval-jsonl`
 behave exactly as before.
+
+### 8.7 Three-second minimum, applied before pairing
+
+`MIN_DURATION_SEC = 3.0` drops utterances shorter than three seconds, enforced
+in `pair_ref_audio.py` -- deliberately *before* references are assigned, not on
+the finished JSONL. That ordering is the whole point: a reference here is just
+another row's target, so filtering the pool first means every reference clears
+the bar automatically. Intersecting the two conditions after pairing instead
+keeps only 124,813 rows against **174,425**; the same threshold, 50k rows
+apart.
+
+3.0s is what Higgs' own documentation asks of a cloning reference ("as little
+as 3 to 5 seconds"), so the bar belongs on both sides of the pair.
+
+It removes 36% of the rows but only 12% of the audio -- the discarded clips are
+the short ones -- and mean utterance length rises 5.62s -> 7.70s, which brings
+estimated training time down from 16.6h to ~14.6h per epoch.
+
+Re-running this needed almost no GPU work: only rows were removed, so every
+target's codes already existed, and each reference is a target in the same
+split. The rebuild is a lookup, apart from 45 rows that had previously been
+dropped for having no reference at all and gained one once the pool changed.
 
 ## 9. Still open
 

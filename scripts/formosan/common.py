@@ -80,6 +80,18 @@ TARGET_SR = 24000  # matches scripts/prepare_data.py's default --sample-rate
 
 DNSMOS_OVRL_MIN = 3.0
 
+# Minimum utterance length, in seconds. Applied in pair_ref_audio.py, i.e.
+# BEFORE reference pairing, which is the point that matters: filtering after
+# pairing would leave rows whose target clears the bar but whose reference does
+# not, and intersecting both conditions afterwards throws away far more than
+# necessary (124,813 rows survive that way against 174,425 when the short
+# utterances are removed from the pool first).
+#
+# 3.0s matches what Higgs' own documentation asks of a cloning reference
+# ("as little as 3 to 5 seconds"), and a reference is just another row's
+# target here, so the same bar has to apply to both.
+MIN_DURATION_SEC = 3.0
+
 # --- Speaker embedding model (chosen after an explicit selection experiment:
 # VoiceEncoder vs ECAPA-TDNN vs CAM++ vs ReDimNet2-EN vs ReDimNet2-Multilingual,
 # validated against the real `speaker` labels in ithuan_formosan/nchc_formosan.

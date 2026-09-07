@@ -43,6 +43,7 @@ from sklearn.cluster import AgglomerativeClustering
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
+    MIN_DURATION_SEC,
     REF_CLUSTER_DISTANCE,
     has_usable_speaker_column,
     list_configs,
@@ -153,7 +154,7 @@ def pair_by_embedding(rows: list[dict], emb_cache: dict[str, torch.Tensor], seed
     )
 
 
-def process_manifest(manifest_path: Path, seed: int, overwrite: bool) -> None:
+def process_manifest(manifest_path: Path, seed: int, overwrite: bool, min_duration: float) -> None:
     out_path = manifest_path.with_name(manifest_path.stem + ".reffed.jsonl")
     if out_path.exists() and not overwrite:
         print(f"[skip] {out_path} exists")
@@ -163,6 +164,17 @@ def process_manifest(manifest_path: Path, seed: int, overwrite: bool) -> None:
     if not rows:
         print(f"[skip] {manifest_path} is empty")
         return
+
+    # Drop short utterances *before* pairing, so references are only ever drawn
+    # from clips that clear the bar too (see common.MIN_DURATION_SEC).
+    if min_duration > 0:
+        n_before = len(rows)
+        rows = [r for r in rows if (r.get("duration") or 0.0) >= min_duration]
+        if n_before != len(rows):
+            print(f"  dropped {n_before - len(rows)}/{n_before} rows shorter than {min_duration}s")
+        if not rows:
+            print(f"[skip] {manifest_path} has nothing at or above {min_duration}s")
+            return
 
     usable_speaker = has_usable_speaker_column(rows)
     print(f"[{manifest_path.name}] {len(rows)} rows, usable_speaker_column={usable_speaker}")
@@ -192,6 +204,8 @@ def main() -> None:
     ap.add_argument("--config", default="all")
     ap.add_argument("--splits", default="train,eval")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--min-duration", type=float, default=MIN_DURATION_SEC,
+                    help="Drop utterances shorter than this many seconds before pairing. 0 disables.")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
 
@@ -213,7 +227,7 @@ def main() -> None:
         raise SystemExit("Pass either --manifest or --dataset")
 
     for path in targets:
-        process_manifest(path, args.seed, args.overwrite)
+        process_manifest(path, args.seed, args.overwrite, args.min_duration)
 
 
 if __name__ == "__main__":
