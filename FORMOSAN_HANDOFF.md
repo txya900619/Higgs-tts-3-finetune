@@ -238,9 +238,12 @@ root partition, and put 60GB of klokah parquet there before it was noticed.
 `materialize.py` imports `hf_hub_download` after `common` for exactly this
 reason; keep it that way, and prefer setting `HF_HOME` in the environment too.
 
-Also note `$HF_HOME/modules/transformers_modules` on this machine is owned by
-root, so `trust_remote_code` loads fail with `PermissionError` until someone
-runs `chown`; `HF_MODULES_CACHE=<writable dir>` works around it.
+One environment wart to watch for on a fresh machine:
+`$HF_HOME/modules/transformers_modules` gets created by whichever process
+touches it first, so if anything ever runs as root there, every later
+`trust_remote_code` load fails with `PermissionError`. That happened here and
+was fixed with `chown`; `HF_MODULES_CACHE=<writable dir>` is the workaround if
+you cannot chown.
 
 
 Nothing here is irreplaceably tied to this machine. What a new server
