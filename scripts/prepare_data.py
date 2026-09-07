@@ -150,8 +150,18 @@ def main() -> None:
         codec, target_paths, args.sample_rate, device,
         args.batch_size, desc="Encoding target audio",
     )
-    for record, codes in zip(records, target_codes):
-        record["audio_codes"] = codes.tolist()
+    # Reference audio is drawn from the same manifest, so nearly every ref file
+    # is also some other row's target -- 171,599 of 171,614 unique refs in the
+    # Formosan train set. Keeping the target codes keyed by path lets the
+    # reference pass skip re-encoding them: 1.63x fewer encodes unsharded, 1.28x
+    # at two shards (a shard only holds a fraction of the files its refs point
+    # at). Encoding is deterministic for a given input, so reuse is exact, not
+    # an approximation.
+    encoded_by_path: Dict[str, Any] = {}
+    for record, path, codes in zip(records, target_paths, target_codes):
+        listed = codes.tolist()
+        record["audio_codes"] = listed
+        encoded_by_path[path] = listed
 
     # Optionally encode reference audio
     if args.encode_reference_audio:
@@ -162,15 +172,25 @@ def main() -> None:
                 ref_paths_to_encode[ref_audio] = None
 
         if ref_paths_to_encode:
-            unique_paths = list(ref_paths_to_encode.keys())
+            path_to_codes = {
+                path: encoded_by_path[path]
+                for path in ref_paths_to_encode
+                if path in encoded_by_path
+            }
+            unique_paths = [p for p in ref_paths_to_encode if p not in encoded_by_path]
+            print(
+                f"[prepare_data] reference audio: {len(ref_paths_to_encode)} unique, "
+                f"{len(path_to_codes)} reused from target encodes, "
+                f"{len(unique_paths)} still to encode"
+            )
             ref_codes = batch_encode_paths(
                 codec, unique_paths, args.sample_rate, device,
                 args.batch_size, desc="Encoding reference audio",
-            )
-            path_to_codes = {
+            ) if unique_paths else []
+            path_to_codes.update({
                 path: codes.tolist()
                 for path, codes in zip(unique_paths, ref_codes)
-            }
+            })
             for record in records:
                 ref_audio = record.get("ref_audio")
                 if isinstance(ref_audio, str) and ref_audio and ref_audio in path_to_codes:

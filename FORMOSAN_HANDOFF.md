@@ -286,9 +286,12 @@ Final output in `/mnt/md0/user_wayne/formosan_final/higgs_jsonl/`:
 
 | file | rows | with ref_audio |
 |---|---|---|
-| `train.jsonl` | 270,812 | 270,812 (100%) |
+| `train.jsonl` | 270,765 | 270,765 (100%) |
 | `eval.jsonl` | 12,420 | 12,420 (100%) |
 | `test.jsonl` | 12,420 | byte-identical copy of eval |
+
+Encoded through `prepare_data.py` into `train_codes.jsonl` (3.25GB) /
+`eval_codes.jsonl` / `test_codes.jsonl`, which is what `sft.py` consumes.
 
 284,655 rows survived the DNSMOS/mandarin filter out of ~530k source rows,
 covering all 42 lang_codes, 72GB of 24kHz mono wav. Verified end-to-end
@@ -471,6 +474,49 @@ documentation and discussion says "zero-shot voice cloning" to mean *cloning
 from a 3-5s clip without finetuning*, which still uses a reference. That is a
 different thing from the reference-free "Zero-shot TTS" in the model card's
 usage example.
+
+### 8.6.2 Duplicate source ids produce mislabelled audio
+
+`ithuan_formosan` reuses ids: `trv-x-truku` alone has 48 ids carrying two rows
+each, and `trv-x-tgdy` one more. The audio bytes are **identical** across each
+pair while the text differs -- the same recording labelled with two different
+transcripts. Nothing in the data says which transcript is right.
+
+That matters here beyond the labelling, because `materialize.py` writes audio
+to `<id>.wav`: a repeated id means the second row silently overwrites the
+first, and both manifest rows then point at one file. At least one of them is
+therefore a wrong text->audio pair, which is precisely what a TTS model must
+not be trained on.
+
+`materialize.py` now scans each split's parquet for repeated ids up front and
+drops **every** row carrying one. Scanning the source rather than the finished
+manifest is the important part: when only one of a duplicated pair survives the
+DNSMOS/mandarin filter, the manifest shows no duplicate at all, yet the
+surviving row may still be the one holding the wrong transcript. Source-level
+scanning caught 49 rows where the manifest showed only 12.
+
+### 8.6.3 `prepare_data.py` reuses target codes for references
+
+Reference audio is drawn from the same manifest, so nearly every ref file is
+also some other row's target -- 171,599 of 171,614 unique refs. The reference
+pass now looks up the target codes instead of re-encoding: 1.63x fewer encodes
+unsharded, 1.28x at six shards (a shard holds only a fraction of the files its
+refs point at). Encoding is deterministic for a given input, verified, so the
+reuse is exact; output is byte-identical to the previous code path.
+
+Throughput notes for re-running it: the work is GPU-bound only once several
+workers share a card. One worker per GPU left utilisation near 55%, because
+each process is pinned at ~97% of a single core doing torchcodec decode. Three
+workers per GPU (six shards over two cards) saturates both at ~100% and cut the
+full train pass to ~2.1h.
+
+Batched encoding was measured and **rejected**. Sorting by duration and
+batching 8 reaches 50 files/sec against 16.5 sequential, but padding corrupts
+the codes: a T=119 utterance padded into a T=412 batch had 97% of its codes
+differ, i.e. it was mostly encoding silence. Even an unpadded file in a batch
+differs slightly, since batch size changes cuDNN kernel selection (the codec is
+otherwise deterministic -- same input, same batch shape, identical codes across
+runs, on CPU and GPU). Training targets are not worth that.
 
 ### 8.6.1 Validation loop (`--eval-jsonl`)
 

@@ -95,6 +95,37 @@ def split_parquet_paths(repo: str, config: str, split: str) -> list[str]:
     return [hf_hub_download(repo, n, repo_type="dataset") for n in names]
 
 
+def duplicated_ids(paths: list[str]) -> set[str]:
+    """Ids that appear more than once in this (config, split).
+
+    Audio is written to `<id>.wav`, so a repeated id means the second row
+    silently overwrites the first and both manifest rows then point at one
+    file. ithuan_formosan does this: `trv-x-truku` alone has 48 ids carrying
+    two rows each, with byte-identical audio but *different* text -- the same
+    recording labelled with two transcripts. One of them is wrong and nothing
+    in the data says which, so both rows are dropped rather than keeping a
+    coin-flip. It is a tiny number (12 rows of 284,655 survive filtering), and
+    a wrong text->audio pair is exactly what a TTS model must not be taught.
+    """
+    seen: set[str] = set()
+    repeated: set[str] = set()
+    for row_id in paths:
+        if row_id in seen:
+            repeated.add(row_id)
+        seen.add(row_id)
+    return repeated
+
+
+def scan_ids(paths: list[str]) -> set[str]:
+    """Ids appearing more than once across this split's parquet files."""
+    ids: list[str] = []
+    for path in paths:
+        pf = pq.ParquetFile(path)
+        for rg in range(pf.metadata.num_row_groups):
+            ids.extend(str(x) for x in pf.read_row_group(rg, columns=["id"]).column("id").to_pylist())
+    return duplicated_ids(ids)
+
+
 def process_split(repo: str, config: str, split: str, limit: int | None, overwrite: bool) -> dict:
     manifest_path = manifest_dir(repo) / f"{config}_{split}.jsonl"
     if manifest_path.exists() and not overwrite and limit is None:
@@ -102,9 +133,10 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
 
     paths = split_parquet_paths(repo, config, split)
     out_dir = audio_dir(repo, config)
+    ambiguous_ids = scan_ids(paths)
 
     n_seen = n_kept = 0
-    n_bad_dnsmos = n_bad_mandarin = n_decode_error = 0
+    n_bad_dnsmos = n_bad_mandarin = n_decode_error = n_dup_id = 0
     t0 = time.time()
     stop = False
 
@@ -137,6 +169,9 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
                         continue
 
                     row_id = str(row["id"])
+                    if row_id in ambiguous_ids:
+                        n_dup_id += 1
+                        continue
                     wav_path = out_dir / f"{row_id}.wav"
                     try:
                         samples = AudioDecoder(
@@ -173,6 +208,7 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
         "n_kept": n_kept,
         "n_skipped_dnsmos": n_bad_dnsmos,
         "n_skipped_mandarin": n_bad_mandarin,
+        "n_skipped_duplicate_id": n_dup_id,
         "n_decode_error": n_decode_error,
         "elapsed_sec": round(time.time() - t0, 1),
         "manifest": str(manifest_path),
