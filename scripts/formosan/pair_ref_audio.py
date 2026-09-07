@@ -14,11 +14,12 @@ Two strategies, chosen automatically per manifest:
     utterance in this manifest gets no ref (we do not force a
     cross-speaker match).
   - No usable `speaker` column (ntu_formosan_corpus, klokah, and those 4
-    nchc_formosan configs): HDBSCAN clustering (metric=precomputed cosine
-    distance, min_cluster_size=5, min_samples=1 -- see common.py for the
-    rationale) on the cached ReDimNet2 embeddings from speaker_embed.py.
-    Sample a random utterance from the same cluster. Rows HDBSCAN calls
-    noise (-1), or whose cluster has no other member, get no ref.
+    nchc_formosan configs): agglomerative clustering (average linkage over the
+    precomputed cosine distance, cut at REF_CLUSTER_DISTANCE -- see common.py
+    for why this replaced HDBSCAN) on the cached ReDimNet2 embeddings from
+    speaker_embed.py. Sample a random utterance from the same cluster. Only a
+    row that ends up alone in its own cluster gets no ref; unlike HDBSCAN
+    there is no noise label.
 
 Input:  <manifest_dir>/<config>_<split>.jsonl   (from materialize.py)
 Output: <manifest_dir>/<config>_<split>.reffed.jsonl
@@ -38,14 +39,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.cluster import HDBSCAN
+from sklearn.cluster import AgglomerativeClustering
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    HDBSCAN_MIN_CLUSTER_SIZE,
-    HDBSCAN_MIN_SAMPLES,
-    REF_PAIR_MIN_COSINE,
-    REF_PAIR_SINGLE_SPEAKER_MEAN_COSINE,
+    REF_CLUSTER_DISTANCE,
     has_usable_speaker_column,
     list_configs,
     load_manifest_rows,
@@ -120,67 +118,38 @@ def pair_by_embedding(rows: list[dict], emb_cache: dict[str, torch.Tensor], seed
 
     embs = np.stack([np.asarray(emb_cache[i]) for i in ids]).astype(np.float64)
     dist = cosine_distance_matrix(embs)
-    clusterer = HDBSCAN(
-        min_cluster_size=HDBSCAN_MIN_CLUSTER_SIZE,
-        min_samples=HDBSCAN_MIN_SAMPLES,
+    labels = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=REF_CLUSTER_DISTANCE,
         metric="precomputed",
-    )
-    labels = clusterer.fit_predict(dist)
+        linkage="average",
+    ).fit_predict(dist)
 
     by_cluster: dict[int, list[int]] = defaultdict(list)
     for idx, lab in enumerate(labels):
-        if lab != -1:
-            by_cluster[lab].append(idx)
+        by_cluster[lab].append(idx)
 
-    # 1.0 - distance recovers cosine similarity (see cosine_distance_matrix).
-    sim = 1.0 - dist
-
-    # Is this manifest essentially one speaker? Only then is HDBSCAN's noise
-    # label an artefact worth overriding (see REF_PAIR_SINGLE_SPEAKER_MEAN_COSINE).
-    off_diagonal = ~np.eye(len(ids), dtype=bool)
-    mean_cosine = float(sim[off_diagonal].mean())
-    single_speaker = mean_cosine >= REF_PAIR_SINGLE_SPEAKER_MEAN_COSINE
-
-    n_noise = int((labels == -1).sum())
     n_none = 0
-    n_rescued = 0
     for idx, i in enumerate(ids):
         r = row_by_id[i]
-        lab = labels[idx]
-        pool = [j for j in by_cluster.get(lab, []) if j != idx] if lab != -1 else []
-        pairing = "embedding_cluster"
-
-        if not pool and single_speaker:
-            # HDBSCAN found no cluster for this row, but the manifest is one
-            # speaker, so that says nothing about identity -- there is simply no
-            # density contrast to find. Fall back to "anyone this row is
-            # confidently the same speaker as" instead of dropping the ref.
-            candidates = np.flatnonzero(sim[idx] >= REF_PAIR_MIN_COSINE)
-            pool = [j for j in candidates.tolist() if j != idx]
-            pairing = "embedding_similarity"
-            if pool:
-                n_rescued += 1
-
+        # Agglomerative assigns every row to a cluster -- there is no noise
+        # label -- so a row only misses out when it is the sole member of its
+        # own cluster, i.e. nothing in the manifest was within
+        # REF_CLUSTER_DISTANCE of it.
+        pool = [j for j in by_cluster[labels[idx]] if j != idx]
         if not pool:
             r["ref_audio_filepath"] = None
             r["ref_text"] = None
-            r["ref_pairing"] = "none_noise_or_singleton_cluster"
+            r["ref_pairing"] = "none_singleton_cluster"
             n_none += 1
             continue
-        choice = rng.choice(pool)
-        ref = row_by_id[ids[choice]]
+        ref = row_by_id[ids[rng.choice(pool)]]
         r["ref_audio_filepath"] = ref["audio_filepath"]
         r["ref_text"] = ref["ipa"]
-        r["ref_pairing"] = pairing
-    rescue = (
-        f"{n_rescued} of those paired by cosine >= {REF_PAIR_MIN_COSINE}"
-        if single_speaker
-        else "cosine fallback off (multi-speaker manifest)"
-    )
+        r["ref_pairing"] = "embedding_cluster"
     print(
-        f"  embedding-cluster pairing: mean_cosine={mean_cosine:.3f} "
-        f"single_speaker={single_speaker}, {n_noise}/{len(ids)} rows marked noise "
-        f"by HDBSCAN, {rescue}, {n_none}/{len(rows)} rows ended up with no ref"
+        f"  embedding-cluster pairing: {len(by_cluster)} clusters at d<{REF_CLUSTER_DISTANCE}, "
+        f"{n_none}/{len(rows)} rows ended up with no ref"
     )
 
 

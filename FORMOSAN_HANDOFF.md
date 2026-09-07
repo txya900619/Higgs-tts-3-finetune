@@ -265,8 +265,8 @@ Final output in `/mnt/md0/user_wayne/formosan_final/higgs_jsonl/`:
 
 | file | rows | with ref_audio |
 |---|---|---|
-| `train.jsonl` | 271,946 | 213,727 (78.6%) |
-| `eval.jsonl` | 12,689 | 11,506 (90.7%) |
+| `train.jsonl` | 271,946 | 270,812 (99.6%) |
+| `eval.jsonl` | 12,689 | 12,420 (97.9%) |
 | `test.jsonl` | 12,689 | byte-identical copy of eval |
 
 284,655 rows survived the DNSMOS/mandarin filter out of ~530k source rows,
@@ -330,40 +330,68 @@ equivalent for (it only resamples while decoding/encoding a stream).
   LPT packing weighted by total duration -> 63.32h vs 63.47h (1.002x). Every
   shard derives the same assignment independently, so it needs no locking.
 
-### 8.4 Ref-audio pairing, corrected twice
+### 8.4 Ref-audio pairing, and why HDBSCAN was replaced
 
 `has_usable_speaker_column` required >=2 distinct values. That was wrong for
 **single-speaker manifests**: all three ithuan_formosan `eval` splits have one
-speaker and were being routed to HDBSCAN on ~14-20 rows, where
-`min_cluster_size=5` can silently drop most refs. The real signal is not the
-count but whether the value equals `lang_code` (the degenerate nchc case), so
-the test is now keyed on that. All three eval manifests now pair at 100%.
+speaker and were being routed to clustering on ~14-20 rows. The real signal is
+not the count but whether the value equals `lang_code` (the degenerate nchc
+case), so the test is now keyed on that.
 
-Two empirical results settled the rest:
+Two empirical results, both worth keeping:
 
 - nchc `ckv`/`trv-x-truku` label speakers `'male'`/`'female'`, which looked
   like gender rather than identity. Embedding all 2,109 ckv rows produced
   **exactly 2 clusters, zero noise, matching the labels** (same-label cosine
   0.717 vs cross-label 0.246): they really are one speaker each.
-- HDBSCAN marks 15-57% of the four single-speaker nchc `pyu-*` configs as
-  noise, because a one-speaker manifest offers no density contrast. Those rows
-  now fall back to pairing with anyone above `REF_PAIR_MIN_COSINE`.
+- klokah's pairwise-cosine distribution is **bimodal** -- modes near 0.25 and
+  0.70 with a clear trough at 0.45-0.55 -- while proven single-speaker nchc
+  `pyu-*` manifests are unimodal around 0.85. klokah is genuinely
+  multi-speaker, and its speakers are cleanly separable.
 
-**`REF_PAIR_MIN_COSINE = 0.70`, and the fallback is gated.** An initial 0.5
-was calibrated on nchc ckv alone -- whose two speakers are male/female, the
-easiest case, max cross-speaker cosine 0.481. Across all five ground-truth
-manifests (19,761 utterances, 6 speaker pairs, 22.6M cross-speaker pairs) the
-true maximum is **0.583**, so 0.5 was unsafe. 0.70 leaves ~0.12 of margin and
-costs 10 rows in 10,969.
+**HDBSCAN (§3's choice) was replaced by agglomerative average linkage at
+`REF_CLUSTER_DISTANCE = 0.40` cosine distance.** §3's experiment was sound but
+scoped too narrowly in two ways, and both only show up at klokah's scale:
 
-The gate matters more than the threshold: the fallback only applies when a
-manifest is *actually* one speaker, measured by mean pairwise cosine
-(`REF_PAIR_SINGLE_SPEAKER_MEAN_COSINE = 0.65`). Proven single-speaker nchc
-`pyu-*` sit at 0.733-0.810; klokah sits at **0.335-0.472** with 18-89 clusters
-per config and inter-cluster similarity up to 0.969. klokah is genuinely
-multi-speaker, its noise labels mean what they say, and it carries 252,758 of
-the 284,655 rows -- applying the fallback there would have mispaired far more
-than it fixed.
+1. *It only measured manifests with 2-3 speakers.* klokah has dozens per
+   config. HDBSCAN is density-based, so a speaker whose recordings vary reads
+   as low density and gets fragmented or called noise: 5-36% of klokah rows,
+   i.e. no ref at all. Lowering `min_cluster_size` made it **worse**, not
+   better (sxr: 11% noise at 5, 45% at 3), which is itself a sign the density
+   model does not fit.
+2. *It scored with ARI, which is the wrong objective here.* Splitting one
+   speaker across several clusters is harmless for pairing -- each cluster is
+   still that speaker -- while merging two speakers is the failure that
+   matters. ARI punishes the harmless case, which is exactly what made
+   agglomerative look "threshold-sensitive" in §3.
+
+Rescored on **cluster purity** (share of rows in a single-speaker cluster)
+over the five labelled manifests, agglomerative holds **100% purity across the
+whole band d=0.40..0.60** and only fails at 0.65, where ithuan `ami-x-skl`'s
+two speakers merge into one cluster and purity drops to 0%. Run
+`scripts/formosan/validate_clustering.py` to reproduce that table; it exists
+so this threshold never gets changed without re-checking purity.
+
+0.40 is chosen over the more permissive end of the band deliberately:
+
+| | d=0.40 | d=0.50 | d=0.60 |
+|---|---|---|---|
+| rows with a ref | 99.51% | 99.89% | ~99.97% |
+| margin to the purity cliff at 0.65 | **0.25** | 0.15 | 0.05 |
+| median candidate pool (klokah) | 357-486 | 441-754 | 464-1801 |
+
+Coverage differs in the third decimal; safety margin differs by multiples, and
+the failure is asymmetric -- one unpaired row costs that row (refs are
+optional per-sample), one merged cluster points a whole cluster's refs at the
+wrong person. The cliff was also located using only 6 speaker pairs, while a
+klokah config has hundreds, so the true cliff there is likely earlier than
+0.65. Even at 0.40 each row still has ~400 candidates, so nothing is lost to
+reduced diversity.
+
+This removed code rather than adding it: the earlier `REF_PAIR_MIN_COSINE`
+cosine fallback and its `REF_PAIR_SINGLE_SPEAKER_MEAN_COSINE` gate existed
+solely to repair HDBSCAN's noise labels, and both are gone. Coverage went from
+79.14% to **99.51%** (rows with no ref: 59,381 -> 1,382).
 
 ### 8.5 §6's leakage question, answered: there was leakage
 
@@ -387,10 +415,6 @@ Hub over the network timed out after 40 minutes on one dataset).
 
 - **Text overlap between train and eval** (see §8.5) -- unresolved by design;
   needs a call on whether to drop the overlapping eval rows.
-- **23% of klokah rows have no ref_audio** (59,381 rows), because their
-  HDBSCAN noise labels are trusted rather than overridden. Lowering
-  `HDBSCAN_MIN_CLUSTER_SIZE` for multi-speaker manifests might recover some;
-  not attempted.
 - `sft.py` still has **no eval loop / `--eval-jsonl`**, so nothing consumes
   `eval.jsonl` for validation loss or checkpoint selection.
 - `sft.py` still has **no `--resume-from-checkpoint`**.

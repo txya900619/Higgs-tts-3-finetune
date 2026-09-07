@@ -92,63 +92,38 @@ REDIMNET_DATASET = "vb2+vox2+cnc2_v0"  # multilingual: VoxBlink2+VoxCeleb2+CN-Ce
 REDIMNET_SR = 16000
 TORCH_HUB_DIR = os.environ.get("FORMOSAN_TORCH_HUB_DIR", str(Path(os.environ["HF_HOME"]) / "torch_hub"))
 
-# HDBSCAN params (same selection experiment: min_cluster_size=5,
-# min_samples=1 gave the best full-scale ARI with the least noise).
-HDBSCAN_MIN_CLUSTER_SIZE = 5
-HDBSCAN_MIN_SAMPLES = 1
-
-# Cosine-similarity floor for pairing a row HDBSCAN labelled noise (-1) with
-# some other utterance anyway.
+# Clustering for ref-audio pairing: agglomerative, average linkage, on the
+# cosine DISTANCE matrix (1 - cosine similarity). Merge the two nearest
+# clusters repeatedly and stop once the nearest pair is further apart than
+# REF_CLUSTER_DISTANCE.
 #
-# Why the fallback exists: HDBSCAN is density-based, so on a manifest that is
-# essentially ONE speaker there is no density contrast to find and it labels
-# the sparse periphery as noise even though every row is the same person.
-# That is exactly what the 4 single-speaker nchc_formosan `pyu-*` configs look
-# like -- mean pairwise cosine 0.73-0.81 across the whole manifest, yet
-# 15-57% of rows came back as noise and lost their ref audio.
+# This replaced HDBSCAN, which the original model-selection experiment picked.
+# That experiment was sound but scoped too narrowly: it only ever measured
+# manifests with 2-3 speakers (ithuan_formosan, nchc_formosan), and it scored
+# them with ARI. Neither transfers to klokah, which holds 252,758 of the
+# 284,655 rows and has dozens of speakers per config:
 #
-# Calibrated on every manifest that carries real speaker ids (ithuan_formosan
-# x3, nchc_formosan ckv + trv-x-truku): 19,761 utterances, 6 distinct speaker
-# pairs, 44.5M same-speaker and 22.6M different-speaker cosine pairs.
+#   - HDBSCAN is density-based, so a speaker whose recordings vary a lot reads
+#     as "low density" and gets fragmented or labelled noise even though those
+#     utterances sit close together. On klokah it left 5-36% of rows as noise,
+#     i.e. with no ref at all, and lowering min_cluster_size made it *worse*
+#     (sxr: 11% noise at 5, 45% at 3). Agglomerative leaves 0.2-0.4% isolated
+#     on the same manifests.
+#   - ARI is the wrong objective here. Splitting one speaker across several
+#     clusters is harmless for pairing (every cluster is still that speaker);
+#     only *merging* two speakers does damage. ARI punishes the harmless case,
+#     which is what made agglomerative look threshold-sensitive. Scored on
+#     cluster purity instead, agglomerative holds 100% purity and 100% pairing
+#     across every labelled manifest for the whole band d=0.45..0.60, and only
+#     fails at 0.65 (ithuan ami-x-skl's two speakers merge).
 #
-#     threshold   different-speaker pairs passing   rows left with no ref
-#         0.50               0.0033%                        0
-#         0.60               0.0000%                        2
-#         0.70               0.0000%                       10  (of 10,969)
-#         0.80               0.0000%                      426
+# 0.50 sits mid-band, and independently at the valley of klokah's bimodal
+# pairwise-cosine distribution (modes near 0.25 and 0.70, trough at 0.45-0.55).
 #
-# The highest different-speaker cosine actually observed is 0.583, so 0.50 is
-# NOT safe despite looking clean against a single config -- an early
-# calibration used only nchc ckv, whose two speakers are male/female, and
-# cross-gender is the easiest case to separate (max 0.481). Same-gender pairs
-# run much closer: nchc trv-x-truku peaks at 0.583.
-#
-# 0.70 leaves ~0.12 of margin above that observed maximum and costs only 10
-# rows (0.09%), because pairing samples randomly among ALL candidates over the
-# bar -- a row loses its ref only if *no* partner clears it, not merely
-# because some same-speaker pairs fall below. The calibration set has just 6
-# speaker pairs while klokah has far more speakers, so the true cross-speaker
-# maximum is likely higher than 0.583; the margin is cheap insurance.
-REF_PAIR_MIN_COSINE = 0.70
-
-# The cosine fallback above is only *justified* when a manifest really is one
-# speaker, which is the case HDBSCAN cannot handle: with no density contrast
-# it labels the sparse periphery as noise even though every row is the same
-# person. When a manifest genuinely holds many speakers, a noise label means
-# what it says, and pairing those rows by similarity would risk exactly the
-# cross-speaker match the whole design avoids.
-#
-# Mean pairwise cosine over the manifest separates the two cases cleanly:
-#     nchc_formosan pyu-x-ksvk / pyu-x-pym  (proven single-speaker)  0.810 / 0.733
-#     ntu_formosan_corpus  xnb / dru-x-ngdr                          0.443 / 0.558
-#     klokah, 10 sampled configs                                     0.335 - 0.472
-#
-# klokah is emphatically multi-speaker -- it also yields 18-89 HDBSCAN clusters
-# per config with inter-cluster similarity reaching 0.969, so no fixed cosine
-# bar could tell its speakers apart. It carries 252,758 of the 284,655 rows, so
-# applying the fallback there would have mispaired far more than it fixed.
-# 0.65 sits in the empty band between the two groups.
-REF_PAIR_SINGLE_SPEAKER_MEAN_COSINE = 0.65
+# Nothing else is needed: the earlier REF_PAIR_MIN_COSINE fallback and its
+# single-speaker gate existed only to repair HDBSCAN's noise labels, and both
+# are gone with it.
+REF_CLUSTER_DISTANCE = 0.40
 
 _HF_FS: Optional[HfFileSystem] = None
 _HF_API: Optional[HfApi] = None
