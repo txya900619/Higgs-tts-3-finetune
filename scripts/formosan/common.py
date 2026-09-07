@@ -69,9 +69,11 @@ DATASETS = [
     "formospeech/nchc_formosan",
 ]
 
-# Output root. Override with FORMOSAN_ROOT when moving to another machine
-# (see FORMOSAN_HANDOFF.md §7) -- nothing else here is machine-specific.
-ROOT = Path(os.environ.get("FORMOSAN_ROOT", "/mnt/md0/user_wayne/formosan_final"))
+# Output root: audio/, manifests/ and higgs_jsonl/ live here. It sits inside
+# the repo but is gitignored -- ~79GB, almost all of it 270k small wav files.
+# Override with FORMOSAN_ROOT when moving to another machine (see
+# FORMOSAN_HANDOFF.md §7); nothing else here is machine-specific.
+ROOT = Path(os.environ.get("FORMOSAN_ROOT", "/mnt/md0/user_wayne/Higgs-tts-3-finetune/data"))
 AUDIO_ROOT = ROOT / "audio"
 MANIFEST_ROOT = ROOT / "manifests"
 OUT_DIR = ROOT / "higgs_jsonl"

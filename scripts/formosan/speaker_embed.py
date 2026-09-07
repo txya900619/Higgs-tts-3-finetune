@@ -20,7 +20,7 @@ padding waste stays small; very short trailing padding has negligible
 effect on the model's pooled embedding.
 
 Usage:
-    python speaker_embed.py --manifest /mnt/md1/user_wayne/formosan_final/manifests/ntu_formosan_corpus/ami-x-pswl_train.jsonl
+    python speaker_embed.py --manifest /mnt/md0/user_wayne/Higgs-tts-3-finetune/data/manifests/ntu_formosan_corpus/ami-x-pswl_train.jsonl
     python speaker_embed.py --dataset formospeech/klokah --config all --device cuda:0
     python speaker_embed.py --dataset formospeech/klokah --config all --device cuda:0 --shard 0 --num-shards 4
 """

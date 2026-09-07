@@ -25,7 +25,7 @@ Input:  <manifest_dir>/<config>_<split>.jsonl   (from materialize.py)
 Output: <manifest_dir>/<config>_<split>.reffed.jsonl
 
 Usage:
-    python pair_ref_audio.py --manifest /mnt/md1/user_wayne/formosan_final/manifests/ithuan_formosan/ami-x-skl_train.jsonl
+    python pair_ref_audio.py --manifest /mnt/md0/user_wayne/Higgs-tts-3-finetune/data/manifests/ithuan_formosan/ami-x-skl_train.jsonl
     python pair_ref_audio.py --dataset formospeech/ithuan_formosan --config all --splits train,eval
 """
 from __future__ import annotations

@@ -2,7 +2,7 @@
 # coding=utf-8
 """Stage 4: assemble the final Higgs-raw-schema jsonl (the format
 `scripts/prepare_data.py` in the main repo expects) from every
-`*.reffed.jsonl` manifest under formosan_final/manifests/, combined across
+`*.reffed.jsonl` manifest under the data root's manifests/, combined across
 all datasets/configs into one multilingual train / eval / test set.
 
 Per-row output schema (matches the Higgs-tts-3-finetune README's "Prepare

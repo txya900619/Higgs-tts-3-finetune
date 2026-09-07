@@ -165,7 +165,7 @@ Four stages, each independently resumable (skip-if-output-exists unless
 
 Config lives in `scripts/formosan/common.py` (paths, thresholds, model
 IDs — read its module docstring first, it explains the pipeline order and
-rationale inline). Output root: `/mnt/md1/user_wayne/formosan_final/`
+rationale inline). Output root: ``data/` inside the repo`
 (`audio/`, `manifests/`, `higgs_jsonl/`).
 
 **Validated end-to-end** with a `--limit 20`-per-config smoke test
@@ -174,7 +174,7 @@ covering both `ithuan_formosan` (speaker-column path) and
 singleton-speaker, and all-noise edge cases) → `build_jsonl.py` → fed the
 resulting `train.jsonl` into the *existing* `scripts/prepare_data.py`
 (unmodified) → successfully produced `[T, N=8]` audio codes. The smoke
-test's output under `formosan_final/` was deleted afterward so the real
+test's output under the data root was deleted afterward so the real
 run starts clean.
 
 **Not yet run at full scale.** The 4 real datasets (~500k rows combined)
@@ -278,11 +278,21 @@ needs:
 ## 8. Status: the full pipeline has been run
 
 All four stages completed on a **different server** than §1-7 were written on
-(`/mnt/md1/user_wayne` does not exist there and `/mnt/md1` is not writable, so
-paths moved to `/mnt/md0/user_wayne/...` and are now overridable via
-`FORMOSAN_ROOT` / `FORMOSAN_HF_HOME` instead of hardcoded).
+(`/mnt/md1/user_wayne` does not exist there and `/mnt/md1` is not writable),
+so paths are now overridable via `FORMOSAN_ROOT` / `FORMOSAN_HF_HOME` instead
+of hardcoded.
 
-Final output in `/mnt/md0/user_wayne/formosan_final/higgs_jsonl/`:
+The data root is `data/` **inside the repo**, gitignored -- ~79GB, almost all
+of it 270k small wav files. Keeping it out of the tree turned out to buy
+nothing: git does not recurse into an ignored directory, and even untracked it
+collapses the whole directory into one status entry (measured: 60k untracked
+files add 0.10s to `git status --porcelain -uall`, and nothing to the default
+mode). Note the manifests and JSONL store **absolute** audio paths, so moving
+this directory means rewriting them -- `sed` over the 229 JSONL files takes
+about a minute; the `*_spk_emb.pt` caches are keyed by row id and are
+unaffected.
+
+Final output in ``data/higgs_jsonl/``:
 
 | file | rows | with ref_audio |
 |---|---|---|

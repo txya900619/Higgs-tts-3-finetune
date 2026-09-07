@@ -9,7 +9,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 PY=.venv/bin/python
-LOG_DIR="${FORMOSAN_ROOT:-/mnt/md0/user_wayne/formosan_final}/logs"
+LOG_DIR="${FORMOSAN_ROOT:-/mnt/md0/user_wayne/Higgs-tts-3-finetune/data}/logs"
 PARALLEL_JOBS="${PARALLEL_JOBS:-4}"
 mkdir -p "$LOG_DIR"
 
