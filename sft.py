@@ -495,11 +495,20 @@ def main() -> None:
         f"max_train_steps={max_train_steps}"
     )
 
+    # Accelerate's AcceleratedScheduler advances the underlying scheduler
+    # `num_processes` times per optimizer step (it assumes the dataloader batch
+    # size was multiplied by the process count), so a schedule sized in
+    # optimizer steps runs `num_processes` times too fast. Unscaled, a 2-GPU run
+    # decayed the LR to zero at step ~681 of 1363 and spent the entire second
+    # half of training not updating at all -- eval loss sat at exactly 4.0252
+    # for the last five evaluations. Scale the schedule to match how often it
+    # will actually be stepped.
+    schedule_scale = accelerator.num_processes
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=max_train_steps,
+        num_warmup_steps=warmup_steps * schedule_scale,
+        num_training_steps=max_train_steps * schedule_scale,
     )
 
     if using_pre_sharded:

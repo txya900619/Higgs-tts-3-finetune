@@ -573,6 +573,29 @@ target's codes already existed, and each reference is a target in the same
 split. The rebuild is a lookup, apart from 45 rows that had previously been
 dropped for having no reference at all and gained one once the pool changed.
 
+### 8.8 The LR schedule ran at `num_processes` speed
+
+The first full training run wasted half its compute, and the symptom was easy
+to misread as convergence: eval loss sat at **exactly** 4.0252 for its last
+five evaluations (steps 750 through 1363). Not nearly equal -- identical to
+four decimals, which is not something real training does.
+
+The cause is that Accelerate's `AcceleratedScheduler.step()` advances the
+underlying scheduler `num_processes` times per optimizer step (it assumes the
+dataloader batch size was multiplied by the process count), while `sft.py`
+sized the schedule in optimizer steps. On two GPUs the LR therefore decayed to
+zero at step ~681 of 1363 and the model stopped updating entirely for the
+second half of the run. The logged LR shows it plainly in hindsight: 9.70e-05
+at step 40, 4.86e-05 at step 360, 0.00e+00 from step ~680 on.
+
+Fixed by scaling both `num_warmup_steps` and `num_training_steps` by
+`accelerator.num_processes`. Verified on a 2-process 20-step run: the LR now
+falls evenly across the whole range (5.26e-05 at the midpoint, zero only at
+the final step) instead of bottoming out halfway.
+
+Worth remembering when reading any future run: **a perfectly flat eval loss is
+a bug signal, not a convergence signal.**
+
 ## 9. Still open
 
 - `sft.py` still has **no `--resume-from-checkpoint`**.
