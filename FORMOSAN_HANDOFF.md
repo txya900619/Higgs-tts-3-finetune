@@ -730,6 +730,48 @@ candidates by file size, because same-duration wavs share a size --
 8KB) instead cuts candidates to 13,531 and the whole scan to 79s with 32
 threads, against ~20 minutes serial.
 
+### 8.11.1 One process per GPU wastes most of the GPU
+
+Every stage here that shards over GPUs -- `speaker_embed.py`,
+`asr_transcribe.py`, `prepare_data.py` -- is a small model doing short,
+sequential work per row, so a single process leaves the card mostly idle
+waiting on Python and the dataloader. Measured on 2x A5000:
+
+| stage | 1 proc/GPU | 2 procs/GPU | per-proc VRAM |
+|---|---|---|---|
+| `asr_transcribe.py` (1,221 rows) | 199s, 22-28% util | **107s (1.86x)**, 22-40% | 5.4GB |
+| `prepare_data.py` (49,362 rows) | ~17min, 57% util | **11min**, 90-96% | 3.0GB |
+
+Both were still short of saturation at 2, and at 5.4GB and 3.0GB a 24GB card
+has room for 3-4. Scale by VRAM, not by GPU count.
+
+`--shard`/`--num-shards` (`--shard-rank`/`--num-shards` in `prepare_data.py`)
+exist for exactly this, and each pins `CUDA_VISIBLE_DEVICES` itself:
+
+```bash
+for r in 0 1 2 3; do
+  CUDA_VISIBLE_DEVICES=$(( r % 2 + 1 )) python eval/asr_transcribe.py \
+    --shard $r --num-shards 4 ... &
+done; wait
+```
+
+Do **not** try to get there through `accelerate launch --num_processes 4` with
+`CUDA_VISIBLE_DEVICES=1,2,1,2`: duplicate device ids are invalid, CUDA falls
+back to CPU, and the only symptom is that it runs 7x slower (3.4 s/it) with
+4MiB of VRAM in use.
+
+The shard split is a greedy longest-first bin-pack over row duration, so shards
+finish within a few seconds of each other rather than the slowest one trailing.
+
+Two process-management notes, since long stages here get interrupted a lot:
+
+- `setsid nohup bash <script>` survives an interrupt; `setsid nohup accelerate
+  launch ...` does **not** -- torch's elastic agent takes the signal and
+  forwards it to its workers. Wrap the launcher in a script.
+- `pkill -f <pattern>` matches the shell running it and kills the session
+  (exit 144). Use `ps -eo pid,args | grep <pattern> | awk '{print $1}' | xargs
+  kill` instead.
+
 ### 8.12 Evaluation harness (`eval/`), and the first three-way numbers
 
 `eval/` scores ground truth, F5-TTS and the Higgs finetune on one row set,
@@ -770,6 +812,11 @@ pairing.
 | ground truth | 9.99 | 2.23 | 0.774 |
 | F5-TTS (legacy g2p table) | 14.92 | 3.86 | 0.801 |
 | Higgs `lora_r16_lr1e-4` | 29.34 | 8.33 | 0.668 |
+
+Re-scored on the current 1,221-row sample, after the 164 re-synthesised rows:
+ground truth 10.00 / 2.23, F5 14.69 / 3.81. Those two are ready to compare a
+retrained Higgs against; `data/eval_out/asr_gt.jsonl` and
+`asr_f5.rank*-of-2.jsonl` hold the transcriptions.
 
 **These are not valid as a baseline.** That checkpoint trained with the LR
 schedule bug of §8.8, on text carrying the §8.10 spacing bug, on data whose
