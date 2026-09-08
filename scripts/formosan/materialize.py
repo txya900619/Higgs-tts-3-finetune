@@ -47,6 +47,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -76,6 +77,11 @@ from common import (  # noqa: E402
 
 from huggingface_hub import hf_hub_download  # noqa: E402  (must follow `common`)
 
+# Kept after `common` for the same reason: it is stdlib-only today, but the
+# ordering above must not depend on that staying true.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "eval"))
+from g2p import text_to_ipa  # noqa: E402
+
 # Everything except `audio`; pulled separately so the (large) audio column is
 # only materialized one row group at a time.
 META_COLUMNS = [
@@ -93,6 +99,55 @@ def split_parquet_paths(repo: str, config: str, split: str) -> list[str]:
         if s.rfilename.startswith(f"{config}/{split}-") and s.rfilename.endswith(".parquet")
     )
     return [hf_hub_download(repo, n, repo_type="dataset") for n in names]
+
+
+def sha_of_file(path: Path) -> str:
+    """Content fingerprint of the written clip, for de-duplication downstream.
+
+    klokah reuses one recording across several lesson items, each with its own
+    id and therefore its own `<id>.wav`. Path-based de-duplication cannot see
+    that, so 576 train rows shared a recording with 425 of the 7,844 eval rows
+    (5.4% of the eval set) -- verified in the source parquet, where e.g.
+    ami-x-frng mode-0000906/0000907 (train) and mode-0000908 (eval) all carry
+    byte-identical audio. Recording the hash here lets `build_jsonl` split on
+    content instead, without re-reading the corpus.
+
+    Hashing the file rather than `samples.data` keeps this value reproducible
+    from the manifest alone: anything can re-derive it from the wav on disk.
+    """
+    h = hashlib.blake2b(digest_size=20)
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def phonemize(text: str, lang_code: str, published: str) -> tuple[str, bool]:
+    """The row's IPA, with the upstream apostrophe spacing bug repaired.
+
+    The published `ipa` column is generated with a g2p table in which 15
+    Atayal/Bunun/Paiwan rows map `ʼ` to "ʔ " -- a phone with a trailing space.
+    That space survives into the corpus, where it is indistinguishable from a
+    word boundary, so it cannot be repaired from the string alone: it splits
+    words in half (`maʼun` -> `maʔ un`, 18,768 rows) and strands punctuation
+    (`taknaʼ.` -> `taknaʔ .`, 5,210 rows), and a word-final `ʼ` legitimately
+    *is* followed by a boundary.
+
+    So we regenerate from `text` instead, where `convert_to_ipa` takes word
+    boundaries from `text.split()` and the ambiguity never arises. This is a
+    repair, not a re-transcription: with the space left in (`strip_values=False`)
+    the same code reproduces the published column byte-for-byte on all 284,606
+    materialised rows, and with it removed the output differs from that column
+    in whitespace alone. The tie bars are undone because the corpus writes the
+    affricates as single code points and only the spacing should change.
+
+    Returns the IPA and whether it had to fall back to the published column.
+    """
+    try:
+        ipa = text_to_ipa(text, lang_code)
+    except (KeyError, ValueError):
+        return strip_ipa_dashes(published), True
+    return ipa.replace("t͡s", "ʦ").replace("t͡ɕ", "ʨ").replace("d͡ʒ", "ʤ"), False
 
 
 def duplicated_ids(paths: list[str]) -> set[str]:
@@ -137,6 +192,7 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
 
     n_seen = n_kept = 0
     n_bad_dnsmos = n_bad_mandarin = n_decode_error = n_dup_id = 0
+    n_ipa_fallback = 0
     t0 = time.time()
     stop = False
 
@@ -182,6 +238,13 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
                         n_decode_error += 1
                         continue
 
+                    audio_sha = sha_of_file(wav_path)
+
+                    ipa, fell_back = phonemize(
+                        row.get("text") or "", config, row.get("ipa") or "",
+                    )
+                    n_ipa_fallback += fell_back
+
                     record = {
                         "id": row_id,
                         "source_dataset": repo,
@@ -190,10 +253,11 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
                         "split": split,
                         "duration": row.get("duration"),
                         "text": row.get("text"),
-                        "ipa": strip_ipa_dashes(row.get("ipa") or ""),
+                        "ipa": ipa,
                         "mandarin": mandarin,
                         "dnsmos_ovrl": dnsmos,
                         "audio_filepath": str(wav_path),
+                        "audio_sha": audio_sha,
                     }
                     if row.get("speaker") is not None:
                         record["speaker"] = row["speaker"]
@@ -210,6 +274,7 @@ def process_split(repo: str, config: str, split: str, limit: int | None, overwri
         "n_skipped_mandarin": n_bad_mandarin,
         "n_skipped_duplicate_id": n_dup_id,
         "n_decode_error": n_decode_error,
+        "n_ipa_fallback": n_ipa_fallback,
         "elapsed_sec": round(time.time() - t0, 1),
         "manifest": str(manifest_path),
     }

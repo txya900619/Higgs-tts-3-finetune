@@ -93,23 +93,48 @@ def main() -> None:
         dataset_tags = [dataset_tag(d) for d in args.datasets.split(",")]
 
     # Some source splits are not disjoint: every one of ithuan_formosan
-    # trv-x-tgdy's 19 eval rows is a byte-for-byte duplicate of a train row
-    # (same id, duration, dnsmos and ipa), and trv-x-truku has one more. Rows
+    # trv-x-tgdy's eval rows is a byte-for-byte duplicate of a train row (same
+    # id, same audio bytes), and trv-x-truku has two more. Re-checked against
+    # the current upstream revision (a1414bd9, 2026-09-02): still 20/20 and
+    # 2/19 -- the overlap is not fixed at the source, so this stays. Rows
     # are written to `<id>.wav`, so a shared id is also a shared *file* -- which
     # is why those eval rows' ref_audio pointed at "train" audio. eval doubles
     # as the held-out test set, so a train row that also appears in eval has to
     # go: drop it from train and keep eval intact. Done here, at assembly, so it
     # holds no matter which manifests are combined.
-    eval_audio: set[str] = set()
+    # Splitting on the file path is not enough. klokah hangs one recording off
+    # several lesson items, each with its own id and so its own `<id>.wav`, and
+    # the train/eval split was made by id: 576 train rows share a recording with
+    # 425 of the 7,844 eval rows (5.4% of the eval set), all of them klokah.
+    # Confirmed in the source parquet -- ami-x-frng mode-0000906/0000907 (train)
+    # and mode-0000908 (eval) are one recording under three ids. So compare the
+    # `audio_sha` materialize records, and index it by path too, since a row
+    # names its reference by path.
+    sha_by_path: dict[str, str] = {}
+    eval_sha: set[str] = set()
+    missing_sha = 0
     for manifest_path in iter_reffed_manifests(dataset_tags):
         stem = manifest_path.name[: -len(".reffed.jsonl")]
-        if stem.rsplit("_", 1)[-1] != "eval":
-            continue
+        is_eval = stem.rsplit("_", 1)[-1] == "eval"
         with open(manifest_path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
-                if line:
-                    eval_audio.add(json.loads(line)["audio_filepath"])
+                if not line:
+                    continue
+                row = json.loads(line)
+                sha = row.get("audio_sha")
+                if not sha:
+                    missing_sha += 1
+                    continue
+                sha_by_path[row["audio_filepath"]] = sha
+                if is_eval:
+                    eval_sha.add(sha)
+    if missing_sha:
+        raise SystemExit(
+            f"{missing_sha} rows have no `audio_sha`. Falling back to path "
+            "comparison would silently re-admit the duplicate recordings this "
+            "guards against -- re-run materialize.py, or backfill the field."
+        )
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_files = {
@@ -118,6 +143,13 @@ def main() -> None:
     }
     counts = {"train": 0, "eval": 0}
     n_with_ref = {"train": 0, "eval": 0}
+    # The same reuse that leaks a recording across splits also repeats one
+    # inside a split: 5,247 train rows and 16 eval rows are re-recordings of a
+    # clip already emitted. In train that silently up-weights those speakers,
+    # in eval it scores the same clip twice, so keep one copy of each. Which
+    # copy is arbitrary but stable -- manifests are walked in sorted order.
+    seen_sha = {"train": set(), "eval": set()}
+    n_dropped_repeat = {"train": 0, "eval": 0}
     n_dropped_dup = 0
     n_stripped_ref = 0
     n_dropped_no_ref = {"train": 0, "eval": 0}
@@ -137,11 +169,16 @@ def main() -> None:
                 if not line:
                     continue
                 row = json.loads(line)
-                if split == "train" and row["audio_filepath"] in eval_audio:
+                sha = sha_by_path[row["audio_filepath"]]
+                if split == "train" and sha in eval_sha:
                     n_dropped_dup += 1
                     continue
+                if sha in seen_sha[split]:
+                    n_dropped_repeat[split] += 1
+                    continue
+                seen_sha[split].add(sha)
                 record = row_to_higgs_record(row)
-                if split == "train" and record.get("ref_audio") in eval_audio:
+                if split == "train" and sha_by_path.get(record.get("ref_audio")) in eval_sha:
                     # Pairing runs before this dedup, so a train row can hold a
                     # ref pointing at audio that turned out to be eval's. eval
                     # doubles as the test set, so that would condition training
@@ -168,6 +205,8 @@ def main() -> None:
     shutil.copyfile(OUT_DIR / "eval.jsonl", test_path)
 
     print(f"dropped {n_dropped_dup} train rows whose audio also appears in eval (source-split overlap)")
+    print(f"dropped repeats of an already-emitted recording: "
+          f"{n_dropped_repeat['train']} train / {n_dropped_repeat['eval']} eval")
     print(f"stripped ref_audio from {n_stripped_ref} train rows that referenced eval audio")
     print(
         f"--require-ref={args.require_ref}: dropped "
