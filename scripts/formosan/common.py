@@ -42,6 +42,10 @@ token must have access):
                             its configs carry a `speaker` column that is
                             just a copy of `lang_code` -- a single distinct
                             value, meaning it's not informative)
+    - ilrdf_dicts         : no eval split, no `speaker` column; 16 configs of
+                            dictionary example sentences. Column-for-column
+                            identical to ntu_formosan_corpus, so it needs no
+                            special handling -- it was simply missing here.
 
 We deliberately do NOT hardcode the per-dataset config (lang_code) list or
 column set here -- `list_configs()` discovers them at runtime from the repo
@@ -67,6 +71,7 @@ DATASETS = [
     "formospeech/klokah",
     "formospeech/ithuan_formosan",
     "formospeech/nchc_formosan",
+    "formospeech/ilrdf_dicts",
 ]
 
 # Output root: audio/, manifests/ and higgs_jsonl/ live here. It sits inside

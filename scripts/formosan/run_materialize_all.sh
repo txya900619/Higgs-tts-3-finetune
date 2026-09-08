@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Stage 1 driver: materialize all four datasets.
+# Stage 1 driver: materialize every dataset in common.DATASETS.
+#
+# Takes dataset names as arguments to do a subset (e.g. a newly added repo);
+# with none it does all of them. Either way a config whose manifest already
+# exists is skipped, so a re-run is a resume.
 #
 # klokah is ~90% of the corpus (413k of ~456k rows) and the stage is
 # download/decode bound rather than CPU bound, so its 42 configs are run
@@ -28,8 +32,16 @@ run_config() {  # dataset, config
 export -f run_config
 export PY LOG_DIR
 
-for ds in formospeech/ntu_formosan_corpus formospeech/ithuan_formosan \
-          formospeech/nchc_formosan formospeech/klokah; do
+if [ "$#" -gt 0 ]; then
+    DATASETS=("$@")
+else
+    mapfile -t DATASETS < <($PY -c "
+import sys; sys.path.insert(0,'scripts/formosan')
+from common import DATASETS
+print('\n'.join(DATASETS))")
+fi
+
+for ds in "${DATASETS[@]}"; do
     echo "=============== $ds ==============="
     mapfile -t cfgs < <($PY -c "
 import sys; sys.path.insert(0,'scripts/formosan')
