@@ -179,3 +179,6 @@ venv.bak/
 .webassets-cache
 wheels/
 #   you could uncomment the following to ignore the entire vscode folder
+
+# Vendored evaluation code is committed; its checkpoints are not (2.4GB, from
+# k2-fsa/TTS_eval_models, fetched on first use by eval/score.py).

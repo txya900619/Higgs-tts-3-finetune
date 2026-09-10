@@ -142,7 +142,36 @@ TORCH_HUB_DIR = os.environ.get("FORMOSAN_TORCH_HUB_DIR", str(Path(os.environ["HF
 # Nothing else is needed: the earlier REF_PAIR_MIN_COSINE fallback and its
 # single-speaker gate existed only to repair HDBSCAN's noise labels, and both
 # are gone with it.
-REF_CLUSTER_DISTANCE = 0.40
+#
+# Tightened 0.40 -> 0.30 after measuring what the pairs actually look like.
+# Purity cannot get worse as the threshold falls -- agglomerative clustering is
+# hierarchical, so merging two speakers only ever happens at a *larger* d --
+# which leaves over-splitting as the only cost, and that is measurable. Over
+# the 219,179 rows this pairs (target-vs-reference cosine on the same ReDimNet
+# embeddings, sweeping the threshold and re-pairing):
+#
+#   d      no ref          <0.6 sim   <0.7 sim   >=0.8 sim   labelled clusters
+#   0.20   3,128 (1.43%)      0.0%       0.2%      85.0%     18  (11 speakers)
+#   0.25     907 (0.41%)      0.0%       2.4%      67.4%     18
+#   0.30     311 (0.14%)      0.4%       7.5%      56.9%     11  <- exact
+#   0.40     103 (0.05%)      2.4%      14.8%      50.1%     11
+#
+# 0.30 is the bottom of the band that still recovers the speaker count exactly
+# on the labelled manifests; below it the clustering starts splitting single
+# speakers (18 clusters for 11 speakers at 0.25). It costs 208 more rows than
+# 0.40 and takes pairs below 0.6 from 2.4% to 0.4%, and below 0.5 from 445 rows
+# to 16.
+#
+# Deliberately not going lower. At 0.25 the remaining gain comes from picking
+# references inside an over-split cluster -- adjacent passages of one recording
+# session -- which trades reference diversity for a similarity number. Cloning
+# wants the diversity: a model given near-identical reference and target learns
+# to copy the channel rather than the speaker.
+#
+# For scale, references paired from a real `speaker` column (ithuan_formosan,
+# nchc_formosan: 19,997 rows) sit at median 0.872 with nothing below 0.6, so
+# clustering remains the weaker path either way.
+REF_CLUSTER_DISTANCE = 0.30
 
 _HF_FS: Optional[HfFileSystem] = None
 _HF_API: Optional[HfApi] = None

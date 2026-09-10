@@ -7,12 +7,12 @@ as overall, because dialect difficulty varies enormously here -- the ground
 truth alone spans 3.5% to 58.6% WER, so a single pooled number says almost
 nothing about whether a system works.
 
-Speaker similarity is cosine on ReDimNet b6 embeddings between each synthesised
-clip and the reference clip it was cloned from, using the same model and
-decoding path as ``scripts/formosan/speaker_embed.py`` so the numbers stay
-comparable with the corpus-side clustering work. Ground truth is scored the
-same way: it is a *different utterance by the same speaker*, which makes it the
-natural ceiling rather than a perfect 1.0.
+Speaker similarity is SIM-o: cosine between the synthesised clip and the
+reference clip it was cloned from, on WavLM-large + ECAPA-TDNN embeddings --
+the UniSpeech speaker-verification checkpoint F5-TTS, VALL-E, seed-tts-eval and
+OmniVoice all report against. Ground truth is scored the same way: it is a
+*different utterance by the same speaker*, which makes it the natural ceiling
+rather than a perfect 1.0.
 
 Usage:
     python eval/score.py --manifest data/eval_out/s30_higgs.jsonl \
@@ -70,20 +70,75 @@ def rate(errors: int, total: int) -> float:
     return 100.0 * errors / total if total else float("nan")
 
 
-def speaker_similarity(pairs: list[tuple[str, str]], device: str) -> dict[tuple[str, str], float]:
-    """Cosine between each (generated, reference) pair, one ReDimNet pass each."""
+SIM_REPO = "k2-fsa/TTS_eval_models"
+SIM_SR = 16000
+SIM_MAX_SECONDS = 120.0
+
+
+def load_sim_model(device: str):
+    """WavLM-large + ECAPA-TDNN, the speaker-verification model SIM-o is defined on.
+
+    This is deliberately *not* the ReDimNet used for reference pairing. Scoring
+    with the model that chose the references would be circular: we would be
+    asking whether the pairs ReDimNet called similar are, by ReDimNet, similar.
+    It is also the metric the field reports -- F5-TTS, VALL-E, seed-tts-eval and
+    OmniVoice all score SIM-o with this UniSpeech checkpoint -- so the numbers
+    mean the same thing here as in a paper.
+
+    Weights come from k2-fsa/TTS_eval_models (~2.4GB, downloaded once): the SSL
+    encoder `wavlm_large/wavlm_large.pt` and the verification head
+    `wavlm_large_finetune.pth`. `strict=False` is upstream's own call -- the
+    checkpoint carries keys for the frozen SSL encoder that the module rebuilds.
+    """
+    import torch
+    from huggingface_hub import snapshot_download
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from vendor.ecapa_tdnn_wavlm import ECAPA_TDNN_WAVLM
+
+    root = Path(snapshot_download(SIM_REPO, allow_patterns=["speaker_similarity/wavlm_large*"]))
+    model = ECAPA_TDNN_WAVLM(
+        feat_dim=1024, channels=512, emb_dim=256, sr=SIM_SR,
+        ssl_model_path=str(root / "speaker_similarity" / "wavlm_large") + os.sep,
+    )
+    state = torch.load(root / "speaker_similarity" / "wavlm_large_finetune.pth",
+                       map_location="cpu")
+    model.load_state_dict(state["model"], strict=False)
+    return model.to(device).eval()
+
+
+def speaker_similarity(pairs: list[tuple[str, str]], device: str,
+                       model_name: str = "wavlm") -> dict[tuple[str, str], float]:
+    """Cosine between each (generated, reference) pair's speaker embedding.
+
+    `model_name="redimnet"` switches to the corpus-side pairing model, which is
+    only useful for auditing the pairing itself -- see load_sim_model on why it
+    is the wrong choice for scoring a system.
+    """
     import numpy as np
     import torch
-    from speaker_embed import load_model, load_wav  # reuse the corpus-side loader
+    from torchcodec.decoders import AudioDecoder
 
-    model = load_model(device)
+    if model_name == "redimnet":
+        from speaker_embed import load_model, load_wav
+        model = load_model(device)
+        def embed_raw(path):
+            wav = torch.from_numpy(load_wav(path)).unsqueeze(0).to(device)
+            return model(wav).squeeze(0)
+    else:
+        model = load_sim_model(device)
+        max_samples = int(SIM_MAX_SECONDS * SIM_SR)
+        def embed_raw(path):
+            wav = AudioDecoder(path, sample_rate=SIM_SR, num_channels=1
+                               ).get_all_samples().data.squeeze(0)[:max_samples]
+            return model([wav.to(device)]).squeeze(0)
+
     cache: dict[str, "np.ndarray"] = {}
 
     def embed(path: str) -> "np.ndarray":
         if path not in cache:
-            wav = torch.from_numpy(load_wav(path)).unsqueeze(0).to(device)
             with torch.inference_mode():
-                vec = model(wav).squeeze(0).float().cpu().numpy()
+                vec = embed_raw(path).float().cpu().numpy()
             cache[path] = vec / (np.linalg.norm(vec) + 1e-12)
         return cache[path]
 
@@ -103,6 +158,9 @@ def main() -> None:
                     help="repeatable; the ASR output for one system")
     ap.add_argument("--out", help="write the full per-row and per-dialect scores here")
     ap.add_argument("--sim-device", default="cuda:0")
+    ap.add_argument("--sim-model", default="wavlm", choices=["wavlm", "redimnet"],
+                    help="wavlm = SIM-o as the literature defines it (default); "
+                         "redimnet = the pairing model, for auditing the pairing only")
     ap.add_argument("--no-sim", action="store_true", help="skip speaker similarity")
     args = ap.parse_args()
 
@@ -137,7 +195,7 @@ def main() -> None:
                     pairs.append((gen, ref))
                     owners.append((name, key))
         print(f"[score] speaker similarity over {len(pairs)} pairs", flush=True)
-        scored = speaker_similarity(pairs, args.sim_device)
+        scored = speaker_similarity(pairs, args.sim_device, args.sim_model)
         for (name, key), pair in zip(owners, pairs):
             sims[name][key] = scored[pair]
 
@@ -184,7 +242,43 @@ def main() -> None:
             line += f"{rate(b['we'], b['wn']):>8.2f}{rate(b['ce'], b['cn']):>7.2f}{sim:>7.3f}"
         print(line)
 
+    # OVERALL above pools every row, so the dialects with the most rows decide
+    # it. They are not the interesting ones: ground-truth WER runs from 3.5% to
+    # 58.6% here, so a system can move the pooled number while doing nothing for
+    # the dialects that need help. The macro average gives each dialect one
+    # vote, which is what OmniVoice reports across languages and what should be
+    # read first.
+    macro = f"{'MACRO-AVG':<16}{len(dialects):>5}"
+    for name in names:
+        cols = []
+        for key in ("wer", "cer", "sim"):
+            vals = []
+            for d in dialects:
+                b = agg[name].get(d)
+                if not b:
+                    continue
+                v = ({"wer": rate(b["we"], b["wn"]), "cer": rate(b["ce"], b["cn"])}
+                     .get(key) if key != "sim"
+                     else (b["sim"] / b["sn"] if b["sn"] else None))
+                if v is not None and v == v:
+                    vals.append(v)
+            cols.append(sum(vals) / len(vals) if vals else float("nan"))
+        macro += f"{cols[0]:>8.2f}{cols[1]:>7.2f}{cols[2]:>7.3f}"
+    print(macro)
+
     if args.out:
+        def macro_avg(name: str, key: str):
+            vals = []
+            for d, b in agg[name].items():
+                if d == "__all__":
+                    continue
+                v = (rate(b["we"], b["wn"]) if key == "wer"
+                     else rate(b["ce"], b["cn"]) if key == "cer"
+                     else (b["sim"] / b["sn"] if b["sn"] else None))
+                if v is not None and v == v:
+                    vals.append(v)
+            return sum(vals) / len(vals) if vals else None
+
         summary = {
             name: {
                 d: {"wer": rate(b["we"], b["wn"]), "cer": rate(b["ce"], b["cn"]),
@@ -193,6 +287,8 @@ def main() -> None:
             }
             for name in names
         }
+        for name in names:
+            summary[name]["__macro__"] = {k: macro_avg(name, k) for k in ("wer", "cer", "sim")}
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump({"summary": summary, "rows": per_row}, fh, ensure_ascii=False, indent=1)
